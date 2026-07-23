@@ -263,7 +263,9 @@ object YTPlayerUtils {
         try {
             val request = okhttp3.Request.Builder()
                 .url(url)
-                .header("Range", "bytes=0-0")
+                // Match the largest request the player will make. A one-byte probe can
+                // succeed even when YouTube rejects a larger playback range with HTTP 403.
+                .header("Range", "bytes=0-262143")
                 .get()
                 .build()
             httpClient.newCall(request).execute().use { response ->
