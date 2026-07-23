@@ -30,6 +30,12 @@ jobs:
       - name: Build debug APK and run jvm tests
         run: ./gradlew assembleCoreDebug lintCoreDebug testCoreDebugUnitTest --stacktrace -DskipFormatKtlint
 
+      - name: Smoke test live YouTube playback requests
+        run: >-
+          ./gradlew :innertube:test
+          --tests 'com.zionhuang.innertube.PlaybackRequestSmokeTest'
+          --stacktrace
+
       - name: Upload core debug APK
         uses: actions/upload-artifact@v4
         with:
