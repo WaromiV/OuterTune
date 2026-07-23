@@ -111,6 +111,7 @@ class PlaybackRequestSmokeTest {
 
         private val VIDEO_IDS = listOf(
             "dQw4w9WgXcQ",
+            "mXrAmH1RpDU",
             "jF4KKOsoyDs",
             "NCC6lI0GGy0",
         )
