@@ -92,14 +92,17 @@ object YTPlayerUtils {
                 "dataSyncId present: ${!YouTube.dataSyncId.isNullOrBlank()} (len=${YouTube.dataSyncId?.length ?: 0}), " +
                 "visitorData present: ${!YouTube.visitorData.isNullOrBlank()}")
 
-        val (webPlayerPot, webStreamingPot) = getWebClientPoTokenOrNull(videoId, sessionId)?.let {
+        val (webSessionPot, webVideoPot) = getWebClientPoTokenOrNull(videoId, sessionId)?.let {
             Pair(it.playerRequestPoToken, it.streamingDataPoToken)
         } ?: Pair(null, null).also {
             Log.w(TAG, "[$videoId] No po token")
         }
+        // The live WEB_REMIX endpoint accepts the video-bound token on /player. Keeping the
+        // request and preferred URL token on the same binding also covers CDNs that couple them.
+        val webRequestPot = webVideoPot ?: webSessionPot
 
         val mainPlayerResponse =
-            YouTube.player(videoId, playlistId, MAIN_CLIENT, signatureTimestamp, webPlayerPot)
+            YouTube.player(videoId, playlistId, MAIN_CLIENT, signatureTimestamp, webRequestPot)
                 .getOrThrow()
 
         val audioConfig = mainPlayerResponse.playerConfig?.audioConfig
@@ -135,7 +138,7 @@ object YTPlayerUtils {
                 }
 
                 val playerResult =
-                    YouTube.player(videoId, playlistId, client, signatureTimestamp, webPlayerPot)
+                    YouTube.player(videoId, playlistId, client, signatureTimestamp, webRequestPot)
                 playerResult.exceptionOrNull()?.let {
                     Log.e(TAG, "[$videoId] [${client.clientName}] player request failed", it)
                 }
@@ -169,10 +172,10 @@ object YTPlayerUtils {
                 val streamCandidates =
                     if (client.useWebPoTokens) {
                         buildList {
-                            webStreamingPot?.let {
+                            webVideoPot?.let {
                                 add("video" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
                             }
-                            webPlayerPot?.let {
+                            webSessionPot?.let {
                                 add("session" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
                             }
                             add("none" to baseStreamUrl)
@@ -256,8 +259,9 @@ object YTPlayerUtils {
         // cause the request to return UNPLAYABLE.
         val signatureTimestamp = getSignatureTimestampOrNull(videoId)
         val sessionId = YouTube.visitorData
-        val webPlayerPot = getWebClientPoTokenOrNull(videoId, sessionId)?.playerRequestPoToken
-        return YouTube.player(videoId, playlistId, WEB_REMIX, signatureTimestamp, webPlayerPot)
+        val tokens = getWebClientPoTokenOrNull(videoId, sessionId)
+        val webRequestPot = tokens?.streamingDataPoToken ?: tokens?.playerRequestPoToken
+        return YouTube.player(videoId, playlistId, WEB_REMIX, signatureTimestamp, webRequestPot)
     }
 
     private fun findFormat(
