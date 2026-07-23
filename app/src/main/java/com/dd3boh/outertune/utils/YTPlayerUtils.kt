@@ -15,6 +15,8 @@ import com.dd3boh.outertune.constants.AudioQuality
 import com.dd3boh.outertune.utils.YTPlayerUtils.MAIN_CLIENT
 import com.dd3boh.outertune.utils.YTPlayerUtils.STREAM_FALLBACK_CLIENTS
 import com.dd3boh.outertune.utils.YTPlayerUtils.validateStatus
+import com.dd3boh.outertune.utils.cipher.PlayerCipherConfigStore
+import com.dd3boh.outertune.utils.cipher.PlayerJsFetcher
 import com.dd3boh.outertune.utils.cipher.SignatureCipherManager
 import com.dd3boh.outertune.utils.potoken.PoTokenGenerator
 import com.dd3boh.outertune.utils.potoken.PoTokenResult
@@ -82,27 +84,25 @@ object YTPlayerUtils {
         val signatureTimestamp = getSignatureTimestampOrNull(videoId)
 
         val isLoggedIn = YouTube.cookie != null
-        val sessionId =
-            if (isLoggedIn) {
-                // signed in sessions use dataSyncId as identifier
-                YouTube.dataSyncId
-            } else {
-                // signed out sessions use visitorData as identifier
-                YouTube.visitorData
-            }
+        // BotGuard's session token is bound to visitorData. dataSyncId identifies the signed-in
+        // account but is not the PoToken session context.
+        val sessionId = YouTube.visitorData
 
         Log.d(TAG, "[$videoId] signatureTimestamp: $signatureTimestamp, isLoggedIn: $isLoggedIn, " +
                 "dataSyncId present: ${!YouTube.dataSyncId.isNullOrBlank()} (len=${YouTube.dataSyncId?.length ?: 0}), " +
                 "visitorData present: ${!YouTube.visitorData.isNullOrBlank()}")
 
-        val (webPlayerPot, webStreamingPot) = getWebClientPoTokenOrNull(videoId, sessionId)?.let {
+        val (webSessionPot, webVideoPot) = getWebClientPoTokenOrNull(videoId, sessionId)?.let {
             Pair(it.playerRequestPoToken, it.streamingDataPoToken)
         } ?: Pair(null, null).also {
             Log.w(TAG, "[$videoId] No po token")
         }
+        // The live WEB_REMIX endpoint accepts the video-bound token on /player. Keeping the
+        // request and preferred URL token on the same binding also covers CDNs that couple them.
+        val webRequestPot = webVideoPot ?: webSessionPot
 
         val mainPlayerResponse =
-            YouTube.player(videoId, playlistId, MAIN_CLIENT, signatureTimestamp, webPlayerPot)
+            YouTube.player(videoId, playlistId, MAIN_CLIENT, signatureTimestamp, webRequestPot)
                 .getOrThrow()
 
         val audioConfig = mainPlayerResponse.playerConfig?.audioConfig
@@ -138,7 +138,7 @@ object YTPlayerUtils {
                 }
 
                 val playerResult =
-                    YouTube.player(videoId, playlistId, client, signatureTimestamp, webPlayerPot)
+                    YouTube.player(videoId, playlistId, client, signatureTimestamp, webRequestPot)
                 playerResult.exceptionOrNull()?.let {
                     Log.e(TAG, "[$videoId] [${client.clientName}] player request failed", it)
                 }
@@ -168,17 +168,43 @@ object YTPlayerUtils {
                     continue
                 }
 
-                if (client.useWebPoTokens && webStreamingPot != null) {
-                    streamUrl += "&pot=$webStreamingPot";
-                }
+                val baseStreamUrl = checkNotNull(streamUrl)
+                val streamCandidates =
+                    if (client.useWebPoTokens) {
+                        buildList {
+                            webVideoPot?.let {
+                                add("video" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
+                            }
+                            webSessionPot?.let {
+                                add("session" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
+                            }
+                            add("none" to baseStreamUrl)
+                        }.distinctBy { it.second }
+                    } else {
+                        listOf("none" to baseStreamUrl)
+                    }
 
                 if (clientIndex == STREAM_FALLBACK_CLIENTS.size - 1) {
                     // skip validateStatus for the last client
+                    streamUrl = streamCandidates.first().second
                     break
                 }
-                if (validateStatus(streamUrl)) {
-                    // working stream found
-                    Log.i(TAG, "[$videoId] [${client.clientName}] found working stream")
+
+                var validated = false
+                for ((binding, candidateUrl) in streamCandidates) {
+                    Log.d(TAG, "[$videoId] [${client.clientName}] validating $binding PoToken binding")
+                    if (validateStatus(candidateUrl, format.contentLength)) {
+                        streamUrl = candidateUrl
+                        validated = true
+                        Log.i(
+                            TAG,
+                            "[$videoId] [${client.clientName}] found working stream " +
+                                "with $binding PoToken binding",
+                        )
+                        break
+                    }
+                }
+                if (validated) {
                     break
                 } else {
                     Log.w(TAG, "[$videoId] [${client.clientName}] got bad http status code")
@@ -232,9 +258,10 @@ object YTPlayerUtils {
         // Include the web player integrity fields because omitting the player PoToken may
         // cause the request to return UNPLAYABLE.
         val signatureTimestamp = getSignatureTimestampOrNull(videoId)
-        val sessionId = if (YouTube.cookie != null) YouTube.dataSyncId else YouTube.visitorData
-        val webPlayerPot = getWebClientPoTokenOrNull(videoId, sessionId)?.playerRequestPoToken
-        return YouTube.player(videoId, playlistId, WEB_REMIX, signatureTimestamp, webPlayerPot)
+        val sessionId = YouTube.visitorData
+        val tokens = getWebClientPoTokenOrNull(videoId, sessionId)
+        val webRequestPot = tokens?.streamingDataPoToken ?: tokens?.playerRequestPoToken
+        return YouTube.player(videoId, playlistId, WEB_REMIX, signatureTimestamp, webRequestPot)
     }
 
     private fun findFormat(
@@ -257,13 +284,26 @@ object YTPlayerUtils {
      * If this returns true the url is likely to work.
      * If this returns false the url might cause an error during playback.
      */
-    private fun validateStatus(url: String): Boolean {
+    private fun validateStatus(url: String, contentLength: Long?): Boolean {
         try {
-            val requestBuilder = okhttp3.Request.Builder()
-                .head()
-                .url(url)
-            val response = httpClient.newCall(requestBuilder.build()).execute()
-            return response.isSuccessful
+            val probePositions = linkedSetOf(0L)
+            contentLength?.takeIf { it > 1 }?.let {
+                // A bad stream PoToken can still serve an initial free window. Probe beyond it
+                // so a byte-zero 206 cannot falsely certify a URL that fails mid-song.
+                probePositions += minOf(1024 * 1024L, it - 1)
+            }
+            for (position in probePositions) {
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("Range", "bytes=$position-$position")
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    Log.d(TAG, "Stream validation at byte $position HTTP ${response.code}")
+                    if (!response.isSuccessful) return false
+                }
+            }
+            return true
         } catch (e: Exception) {
             reportException(e)
         }
@@ -271,9 +311,24 @@ object YTPlayerUtils {
     }
 
     // Reports exceptions; returns null on failure.
-    private fun getSignatureTimestampOrNull(
+    private suspend fun getSignatureTimestampOrNull(
         videoId: String
     ): Int? {
+        // The timestamp and signature function must come from the same player generation.
+        // NewPipe and the embed player can receive different A/B variants; mixing their values
+        // still produces a syntactically valid signature that the CDN rejects with HTTP 403.
+        val playerHash = PlayerJsFetcher.getPlayerJs(videoId)?.hash
+        val playerConfig = PlayerCipherConfigStore.get(playerHash)
+        if (playerConfig != null) {
+            Log.d(
+                TAG,
+                "[$videoId] using signatureTimestamp ${playerConfig.signatureTimestamp} " +
+                    "from cipher player $playerHash",
+            )
+            return playerConfig.signatureTimestamp
+        }
+
+        Log.w(TAG, "[$videoId] no cipher timestamp for player $playerHash; falling back to NewPipe")
         return NewPipeUtils.getSignatureTimestamp(videoId)
             .onFailure {
                 reportException(it)

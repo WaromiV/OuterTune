@@ -27,11 +27,41 @@ jobs:
       - name: Accept SDK licenses
         run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 
+      - name: Restore stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: outertune-debug-keystore-v1
+
       - name: Build debug APK and run jvm tests
         run: ./gradlew assembleCoreDebug lintCoreDebug testCoreDebugUnitTest --stacktrace -DskipFormatKtlint
 
-      - name: Upload APK
+      - name: Smoke test live YouTube playback requests
+        # GitHub-hosted runner IPs are frequently bot-challenged by YouTube. Preserve the
+        # diagnostics without failing an otherwise valid APK build (or skipping cache save).
+        continue-on-error: true
+        run: >-
+          ./gradlew :innertube:test
+          --tests 'com.zionhuang.innertube.PlaybackRequestSmokeTest'
+          --info
+          --stacktrace
+
+      - name: Upload live-request diagnostics
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: app
-          path: app/build/outputs/apk/core/debug/*.apk
+          name: OuterTune-request-diagnostics-${{ github.event.pull_request.head.sha || github.sha }}
+          path: |
+            innertube/build/test-results/test/
+            innertube/build/reports/tests/test/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload core debug APK
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OuterTune-arm64-debug-${{ github.event.pull_request.head.sha || github.sha }}
+          path: app/build/outputs/apk/core/debug/*arm64-v8a*.apk
+          if-no-files-found: error
+          retention-days: 14
