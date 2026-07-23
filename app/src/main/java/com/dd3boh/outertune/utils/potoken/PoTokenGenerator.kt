@@ -18,7 +18,7 @@ class PoTokenGenerator {
 
     private val webPoTokenGenLock = Mutex()
     private var webPoTokenSessionId: String? = null
-    private var webPoTokenStreamingPot: String? = null
+    private var webPoTokenSessionPot: String? = null
     private var webPoTokenGenerator: PoTokenWebView? = null
 
     fun getWebClientPoToken(videoId: String, sessionId: String): PoTokenResult? {
@@ -48,7 +48,7 @@ class PoTokenGenerator {
     private suspend fun getWebClientPoToken(videoId: String, sessionId: String, forceRecreate: Boolean): PoTokenResult {
         if (POTOKEN_DEBUG) Log.d(TAG, "Web poToken requested: $videoId, $sessionId")
 
-        val (poTokenGenerator, streamingPot, hasBeenRecreated) =
+        val (poTokenGenerator, sessionPot, hasBeenRecreated) =
             webPoTokenGenLock.withLock {
                 val shouldRecreate =
                     forceRecreate || webPoTokenGenerator == null || webPoTokenGenerator!!.isExpired || webPoTokenSessionId != sessionId
@@ -63,18 +63,18 @@ class PoTokenGenerator {
                     // create a new webPoTokenGenerator
                     webPoTokenGenerator = PoTokenWebView.getNewPoTokenGenerator(App.instance)
 
-                    // The streaming poToken needs to be generated exactly once before generating
-                    // any other (player) tokens.
-                    webPoTokenStreamingPot = webPoTokenGenerator!!.generatePoToken(webPoTokenSessionId!!)
+                    // The session poToken must be generated exactly once before generating
+                    // any per-video tokens.
+                    webPoTokenSessionPot = webPoTokenGenerator!!.generatePoToken(webPoTokenSessionId!!)
                 }
 
-                Triple(webPoTokenGenerator!!, webPoTokenStreamingPot!!, shouldRecreate)
+                Triple(webPoTokenGenerator!!, webPoTokenSessionPot!!, shouldRecreate)
             }
 
-        val playerPot = try {
+        val videoPot = try {
             // Not using synchronized here, since poTokenGenerator would be able to generate
-            // multiple poTokens in parallel if needed. The only important thing is for exactly one
-            // streaming poToken (based on [sessionId]) to be generated before anything else.
+            // multiple poTokens in parallel if needed. The only important thing is for exactly
+            // one session poToken (based on [sessionId]) to be generated before anything else.
             poTokenGenerator.generatePoToken(videoId)
         } catch (throwable: Throwable) {
             if (hasBeenRecreated) {
@@ -90,8 +90,13 @@ class PoTokenGenerator {
             }
         }
 
-        if (POTOKEN_DEBUG) Log.d(TAG, "[$videoId] playerPot=$playerPot, streamingPot=$streamingPot")
+        if (POTOKEN_DEBUG) Log.d(TAG, "[$videoId] sessionPot=$sessionPot, videoPot=$videoPot")
 
-        return PoTokenResult(playerPot, streamingPot)
+        // The /player request accepts the session-bound token, while googlevideo requires the
+        // video-bound token on the stream URL to serve bytes beyond its initial free window.
+        return PoTokenResult(
+            playerRequestPoToken = sessionPot,
+            streamingDataPoToken = videoPot,
+        )
     }
 }

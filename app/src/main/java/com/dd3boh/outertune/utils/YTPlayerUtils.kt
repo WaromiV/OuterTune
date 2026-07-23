@@ -84,14 +84,9 @@ object YTPlayerUtils {
         val signatureTimestamp = getSignatureTimestampOrNull(videoId)
 
         val isLoggedIn = YouTube.cookie != null
-        val sessionId =
-            if (isLoggedIn) {
-                // signed in sessions use dataSyncId as identifier
-                YouTube.dataSyncId
-            } else {
-                // signed out sessions use visitorData as identifier
-                YouTube.visitorData
-            }
+        // BotGuard's session token is bound to visitorData. dataSyncId identifies the signed-in
+        // account but is not the PoToken session context.
+        val sessionId = YouTube.visitorData
 
         Log.d(TAG, "[$videoId] signatureTimestamp: $signatureTimestamp, isLoggedIn: $isLoggedIn, " +
                 "dataSyncId present: ${!YouTube.dataSyncId.isNullOrBlank()} (len=${YouTube.dataSyncId?.length ?: 0}), " +
@@ -178,7 +173,7 @@ object YTPlayerUtils {
                     // skip validateStatus for the last client
                     break
                 }
-                if (validateStatus(streamUrl)) {
+                if (validateStatus(streamUrl, format.contentLength)) {
                     // working stream found
                     Log.i(TAG, "[$videoId] [${client.clientName}] found working stream")
                     break
@@ -234,7 +229,7 @@ object YTPlayerUtils {
         // Include the web player integrity fields because omitting the player PoToken may
         // cause the request to return UNPLAYABLE.
         val signatureTimestamp = getSignatureTimestampOrNull(videoId)
-        val sessionId = if (YouTube.cookie != null) YouTube.dataSyncId else YouTube.visitorData
+        val sessionId = YouTube.visitorData
         val webPlayerPot = getWebClientPoTokenOrNull(videoId, sessionId)?.playerRequestPoToken
         return YouTube.player(videoId, playlistId, WEB_REMIX, signatureTimestamp, webPlayerPot)
     }
@@ -259,19 +254,26 @@ object YTPlayerUtils {
      * If this returns true the url is likely to work.
      * If this returns false the url might cause an error during playback.
      */
-    private fun validateStatus(url: String): Boolean {
+    private fun validateStatus(url: String, contentLength: Long?): Boolean {
         try {
-            val request = okhttp3.Request.Builder()
-                .url(url)
-                // Match the largest request the player will make. A one-byte probe can
-                // succeed even when YouTube rejects a larger playback range with HTTP 403.
-                .header("Range", "bytes=0-262143")
-                .get()
-                .build()
-            httpClient.newCall(request).execute().use { response ->
-                Log.d(TAG, "Stream validation HTTP ${response.code}")
-                return response.isSuccessful
+            val probePositions = linkedSetOf(0L)
+            contentLength?.takeIf { it > 1 }?.let {
+                // A bad stream PoToken can still serve an initial free window. Probe beyond it
+                // so a byte-zero 206 cannot falsely certify a URL that fails mid-song.
+                probePositions += minOf(1024 * 1024L, it - 1)
             }
+            for (position in probePositions) {
+                val request = okhttp3.Request.Builder()
+                    .url(url)
+                    .header("Range", "bytes=$position-$position")
+                    .get()
+                    .build()
+                httpClient.newCall(request).execute().use { response ->
+                    Log.d(TAG, "Stream validation at byte $position HTTP ${response.code}")
+                    if (!response.isSuccessful) return false
+                }
+            }
+            return true
         } catch (e: Exception) {
             reportException(e)
         }

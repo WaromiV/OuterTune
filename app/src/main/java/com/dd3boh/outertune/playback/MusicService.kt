@@ -1246,10 +1246,7 @@ class MusicService : MediaLibraryService(),
         const val CHANNEL_NAME = "fgs_workaround"
         const val NOTIFICATION_ID = 888
         const val ERROR_CODE_NO_STREAM = 1000001
-        // YouTube CDN playback URLs can reject 512 KiB range requests with HTTP 403 even
-        // when the same signed URL accepts smaller ranges. Keep player/cache reads below
-        // that boundary.
-        const val CHUNK_LENGTH = 256 * 1024L
+        const val CHUNK_LENGTH = 512 * 1024L
 
         const val COMMAND_GET_BINDER = "GET_BINDER"
     }
