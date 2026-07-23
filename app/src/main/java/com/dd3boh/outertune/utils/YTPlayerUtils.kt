@@ -165,17 +165,43 @@ object YTPlayerUtils {
                     continue
                 }
 
-                if (client.useWebPoTokens && webStreamingPot != null) {
-                    streamUrl += "&pot=$webStreamingPot";
-                }
+                val baseStreamUrl = checkNotNull(streamUrl)
+                val streamCandidates =
+                    if (client.useWebPoTokens) {
+                        buildList {
+                            webStreamingPot?.let {
+                                add("video" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
+                            }
+                            webPlayerPot?.let {
+                                add("session" to "$baseStreamUrl&pot=${android.net.Uri.encode(it)}")
+                            }
+                            add("none" to baseStreamUrl)
+                        }.distinctBy { it.second }
+                    } else {
+                        listOf("none" to baseStreamUrl)
+                    }
 
                 if (clientIndex == STREAM_FALLBACK_CLIENTS.size - 1) {
                     // skip validateStatus for the last client
+                    streamUrl = streamCandidates.first().second
                     break
                 }
-                if (validateStatus(streamUrl, format.contentLength)) {
-                    // working stream found
-                    Log.i(TAG, "[$videoId] [${client.clientName}] found working stream")
+
+                var validated = false
+                for ((binding, candidateUrl) in streamCandidates) {
+                    Log.d(TAG, "[$videoId] [${client.clientName}] validating $binding PoToken binding")
+                    if (validateStatus(candidateUrl, format.contentLength)) {
+                        streamUrl = candidateUrl
+                        validated = true
+                        Log.i(
+                            TAG,
+                            "[$videoId] [${client.clientName}] found working stream " +
+                                "with $binding PoToken binding",
+                        )
+                        break
+                    }
+                }
+                if (validated) {
                     break
                 } else {
                     Log.w(TAG, "[$videoId] [${client.clientName}] got bad http status code")
