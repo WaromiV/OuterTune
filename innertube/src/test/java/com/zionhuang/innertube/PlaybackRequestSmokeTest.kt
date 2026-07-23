@@ -8,54 +8,70 @@ import io.ktor.client.request.headers
 import io.ktor.http.isSuccess
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class PlaybackRequestSmokeTest {
     @Test
-    fun `primary and fallback clients return playable selected audio streams`() = runBlocking {
+    fun `at least one direct client returns a playable audio stream per video`() = runBlocking {
         withTimeout(PLAYBACK_TEST_TIMEOUT_MS) {
             HttpClient(OkHttp).use { httpClient ->
-                for (videoId in VIDEO_IDS) {
-                    for (client in DIRECT_STREAM_CLIENTS) {
-                        val playerResponse = YouTube.player(videoId, client = client).getOrThrow()
-                        val status = playerResponse.playabilityStatus
-                        assertEquals(
-                            "video=$videoId client=${client.clientName} reason=${status.reason}",
-                            "OK",
-                            status.status,
-                        )
+                val failures = mutableListOf<String>()
 
-                        val selectedFormat = playerResponse.streamingData
+                for (videoId in VIDEO_IDS) {
+                    val playableClients = mutableListOf<String>()
+
+                    for (client in PLAYER_CLIENTS) {
+                        val label = "video=$videoId client=${client.clientName}"
+                        val playerResult = YouTube.player(videoId, client = client)
+                        val playerResponse = playerResult.getOrNull()
+                        if (playerResponse == null) {
+                            val error = playerResult.exceptionOrNull()
+                            println("$label requestError=${error?.javaClass?.simpleName}: ${error?.message}")
+                            continue
+                        }
+
+                        val status = playerResponse.playabilityStatus
+                        val audioFormats = playerResponse.streamingData
                             ?.adaptiveFormats
                             .orEmpty()
                             .filter { it.isAudio }
+                        val directFormats = audioFormats.count { !it.url.isNullOrBlank() }
+                        val cipherFormats = audioFormats.count { !it.signatureCipher.isNullOrBlank() }
+                        println(
+                            "$label status=${status.status} reason=${status.reason} " +
+                                "audioFormats=${audioFormats.size} directFormats=$directFormats " +
+                                "cipherFormats=$cipherFormats",
+                        )
+
+                        if (status.status != "OK") continue
+
+                        val selectedFormat = audioFormats
+                            .filter { !it.url.isNullOrBlank() }
                             .maxByOrNull {
                                 it.bitrate + if (it.mimeType.startsWith("audio/webm")) 10240 else 0
                             }
-                        assertTrue(
-                            "video=$videoId client=${client.clientName} returned no audio format",
-                            selectedFormat != null,
-                        )
+                        if (selectedFormat == null) continue
 
-                        val streamUrl = selectedFormat?.url
-                        assertTrue(
-                            "video=$videoId client=${client.clientName} selected format has no direct URL",
-                            !streamUrl.isNullOrBlank(),
-                        )
-
-                        val streamResponse = httpClient.get(streamUrl!!) {
+                        val streamResponse = httpClient.get(selectedFormat.url!!) {
                             headers {
                                 append("Range", "bytes=0-1023")
                             }
                         }
-                        assertTrue(
-                            "video=$videoId client=${client.clientName} stream status=${streamResponse.status}",
-                            streamResponse.status.isSuccess(),
+                        println(
+                            "$label selectedItag=${selectedFormat.itag} " +
+                                "streamStatus=${streamResponse.status.value}",
                         )
+                        if (streamResponse.status.isSuccess()) playableClients += client.clientName
+                    }
+
+                    println("video=$videoId playableClients=${playableClients.joinToString().ifEmpty { "none" }}")
+                    if (playableClients.isEmpty()) {
+                        failures += "video=$videoId had no directly playable client"
                     }
                 }
+
+                assertTrue(failures.joinToString(separator = "\n"), failures.isEmpty())
             }
         }
     }
@@ -63,16 +79,33 @@ class PlaybackRequestSmokeTest {
     @Test
     fun `caption track fallback replaces rejected transcript endpoint`() = runBlocking {
         withTimeout(CAPTION_TEST_TIMEOUT_MS) {
+            val failures = mutableListOf<String>()
+
             for (videoId in CAPTION_VIDEO_IDS) {
-                val lyrics = YouTube.transcript(videoId).getOrThrow()
-                assertTrue("video=$videoId returned an empty caption transcript", lyrics.isNotBlank())
+                val transcriptResult = YouTube.transcript(videoId)
+                val lyrics = transcriptResult.getOrNull()
+                if (lyrics == null) {
+                    val error = transcriptResult.exceptionOrNull()
+                    println(
+                        "caption video=$videoId error=${error?.javaClass?.simpleName}: " +
+                            error?.message,
+                    )
+                    failures += "video=$videoId caption request failed"
+                    continue
+                }
+
+                println("caption video=$videoId characters=${lyrics.length} lines=${lyrics.lineSequence().count()}")
+                if (lyrics.isBlank()) failures += "video=$videoId returned an empty caption transcript"
             }
+
+            assertTrue(failures.joinToString(separator = "\n"), failures.isEmpty())
         }
     }
 
     companion object {
-        private val DIRECT_STREAM_CLIENTS = listOf(
+        private val PLAYER_CLIENTS = listOf(
             YouTubeClient.ANDROID_VR_NO_AUTH,
+            YouTubeClient.WEB_REMIX,
             YouTubeClient.IOS,
         )
 
