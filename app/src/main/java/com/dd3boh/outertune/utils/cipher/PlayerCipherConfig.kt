@@ -30,11 +30,14 @@ import java.io.File
  *   `sigFuncName(sigConstantArgs..., sig)`
  * @property nClass the player's URL builder class used to apply the n-transform to the `n`
  *   throttling parameter
+ * @property signatureTimestamp timestamp that must be sent with player requests deciphered by
+ *   this exact player; mixing timestamps across YouTube A/B player variants produces CDN 403s
  */
 data class PlayerCipherConfig(
     val sigFuncName: String,
     val sigConstantArgs: List<Int>,
     val nClass: String,
+    val signatureTimestamp: Int,
 )
 
 /**
@@ -153,8 +156,11 @@ object PlayerCipherConfigStore {
         label: String,
         read: () -> String?,
     ): Map<String, PlayerCipherConfig>? = try {
-        read()?.let(::parse).also {
-            if (it == null) Log.w(TAG, "Could not load or validate $label")
+        val text = read()
+        if (text == null) {
+            null
+        } else {
+            parse(text).also { if (it == null) Log.w(TAG, "Could not validate $label") }
         }
     } catch (e: Exception) {
         Log.w(TAG, "Could not load $label", e)
@@ -193,7 +199,8 @@ object PlayerCipherConfigStore {
         val sig = entry.optString("sig")
         val nClass = entry.optString("nClass")
         val match = signatureRegex.matchEntire(sig) ?: return null
-        if (!nClassRegex.matches(nClass) || entry.optInt("sts", -1) <= 0) return null
+        val signatureTimestamp = entry.optInt("sts", -1)
+        if (!nClassRegex.matches(nClass) || signatureTimestamp <= 0) return null
         return PlayerCipherConfig(
             sigFuncName = match.groupValues[1],
             sigConstantArgs = listOf(
@@ -201,6 +208,7 @@ object PlayerCipherConfigStore {
                 match.groupValues[3].toIntOrNull() ?: return null,
             ),
             nClass = nClass,
+            signatureTimestamp = signatureTimestamp,
         )
     }
 

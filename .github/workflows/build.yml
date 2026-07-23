@@ -27,6 +27,12 @@ jobs:
       - name: Accept SDK licenses
         run: yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
 
+      - name: Restore stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: outertune-debug-keystore-v1
+
       - name: Build debug APK and run jvm tests
         run: ./gradlew assembleCoreDebug lintCoreDebug testCoreDebugUnitTest --stacktrace -DskipFormatKtlint
 

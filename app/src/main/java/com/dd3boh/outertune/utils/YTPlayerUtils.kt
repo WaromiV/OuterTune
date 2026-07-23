@@ -15,6 +15,8 @@ import com.dd3boh.outertune.constants.AudioQuality
 import com.dd3boh.outertune.utils.YTPlayerUtils.MAIN_CLIENT
 import com.dd3boh.outertune.utils.YTPlayerUtils.STREAM_FALLBACK_CLIENTS
 import com.dd3boh.outertune.utils.YTPlayerUtils.validateStatus
+import com.dd3boh.outertune.utils.cipher.PlayerCipherConfigStore
+import com.dd3boh.outertune.utils.cipher.PlayerJsFetcher
 import com.dd3boh.outertune.utils.cipher.SignatureCipherManager
 import com.dd3boh.outertune.utils.potoken.PoTokenGenerator
 import com.dd3boh.outertune.utils.potoken.PoTokenResult
@@ -259,11 +261,15 @@ object YTPlayerUtils {
      */
     private fun validateStatus(url: String): Boolean {
         try {
-            val requestBuilder = okhttp3.Request.Builder()
-                .head()
+            val request = okhttp3.Request.Builder()
                 .url(url)
-            val response = httpClient.newCall(requestBuilder.build()).execute()
-            return response.isSuccessful
+                .header("Range", "bytes=0-0")
+                .get()
+                .build()
+            httpClient.newCall(request).execute().use { response ->
+                Log.d(TAG, "Stream validation HTTP ${response.code}")
+                return response.isSuccessful
+            }
         } catch (e: Exception) {
             reportException(e)
         }
@@ -271,9 +277,24 @@ object YTPlayerUtils {
     }
 
     // Reports exceptions; returns null on failure.
-    private fun getSignatureTimestampOrNull(
+    private suspend fun getSignatureTimestampOrNull(
         videoId: String
     ): Int? {
+        // The timestamp and signature function must come from the same player generation.
+        // NewPipe and the embed player can receive different A/B variants; mixing their values
+        // still produces a syntactically valid signature that the CDN rejects with HTTP 403.
+        val playerHash = PlayerJsFetcher.getPlayerJs(videoId)?.hash
+        val playerConfig = PlayerCipherConfigStore.get(playerHash)
+        if (playerConfig != null) {
+            Log.d(
+                TAG,
+                "[$videoId] using signatureTimestamp ${playerConfig.signatureTimestamp} " +
+                    "from cipher player $playerHash",
+            )
+            return playerConfig.signatureTimestamp
+        }
+
+        Log.w(TAG, "[$videoId] no cipher timestamp for player $playerHash; falling back to NewPipe")
         return NewPipeUtils.getSignatureTimestamp(videoId)
             .onFailure {
                 reportException(it)
